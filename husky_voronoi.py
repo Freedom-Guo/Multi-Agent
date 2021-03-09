@@ -4,14 +4,16 @@ from geometry_msgs.msg import Twist
 from gazebo_msgs.srv import *
 import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
+from scipy.spatial.transform import Rotation as R
 from gazebo_msgs.msg import ModelStates
 import rospy
 import tf
+import math
 
 ##----------------------------------全局参数列表------------------------------------------##
-agent_num = 5
-evader_num = 2
-pursuer_num = 3
+agent_num = 3
+evader_num = 1
+pursuer_num = 2
 death_num = 0
 
 Exit_Pos = [-100., 100., -100., 100.]
@@ -24,11 +26,7 @@ angular_z = []
 pos_x = np.array([0., -5., -7., -5., 4.])
 pos_y = np.array([0., 0., -5., 5., -3.])
 
-V_em = np.array([0.6, 0.6])
-V_pm = np.array([1.0, 1.0, 1.0])
-W_em = np.array([1.0, 1.0])
-W_pm = np.array([0.8, 0.8, 0.8])
-
+flag_capture = False
 death = []
 
 for i in range(agent_num):
@@ -37,7 +35,6 @@ for i in range(agent_num):
     yaw.append(0.)
     linear_x.append(0.)
     angular_z.append(0.)
-
 
 
 ##---------------------------------计算三角形的外心----------------------------------------##
@@ -309,7 +306,101 @@ def get_l_point(A, B, C, D):
     return x1, y1, x2, y2
 
 
-def voronoi(points):
+def is_tri(tri):
+    flag_p = False
+    flag_e = False
+    global death, evader_num, agent_num
+    for i in range(evader_num - len(death)):
+        if tri[0] == i or tri[1] == i:
+            flag_e = True
+            break
+        else:
+            flag_e = False
+    for i in range(evader_num - len(death), agent_num - len(death)):
+        if tri[0] == i or tri[1] == i:
+            flag_p = True
+            break
+        else:
+            flag_p = False
+    return flag_p and flag_e
+
+
+def get_evader(tri):
+    global death, evader_num
+    for i in range(evader_num - len(death)):
+        if tri[0] == i:
+            return i
+        elif tri[1] == i:
+            return i
+
+
+def get_pursuer(tri):
+    global death, evader_num, agent_num
+    for i in range(evader_num - len(death), agent_num - len(death)):
+        if tri[0] == i:
+            i = i - (evader_num - len(death))
+            return i
+        elif tri[1] == i:
+            i = i - (evader_num - len(death))
+            return i
+
+
+def get_neighbor_nearest_evader(i, list_e, point):
+    min_index = 0
+    min_distance = 10000
+    global death, evader_num
+    for j in range(len(list_e)):
+        distance = np.sqrt(np.sum(np.square(point[list_e[j]] - point[i + evader_num - len(death)])))
+        if distance < min_distance:
+            min_index = list_e[j]
+            min_distance = distance
+    return min_index
+
+
+def get_theta(v):
+    if v[0] > 0 and v[1] >= 0:
+        return math.atan(v[1] / v[0])
+    elif v[0] > 0 > v[1]:
+        return math.atan(v[1] / v[0])
+    elif v[0] == 0 and v[1] > 0:
+        return np.pi / 2.0
+    elif v[0] == 0 and v[1] < 0:
+        return (-1) * np.pi / 2.0
+    elif v[0] < 0 <= v[1]:
+        return math.atan(v[1] / v[0]) + np.pi
+    elif v[0] < 0 and v[1] < 0:
+        return math.atan(v[1] / v[0]) - np.pi
+
+
+def get_theta_diff(theta_s, theta_p):
+    if theta_s >= 0 and theta_p >= 0:
+        return theta_p - theta_s
+    elif theta_s <= 0 and theta_p <= 0:
+        return theta_p - theta_s
+    elif (-1) * np.pi <= theta_s <= (-1. / 2.) * np.pi and np.pi >= theta_p >= 1. / 2. * np.pi:
+        return theta_p + theta_s - 2 * np.pi
+    elif (-1) * np.pi <= theta_p <= (-1. / 2.) * np.pi and np.pi >= theta_s >= 1. / 2. * np.pi:
+        return 2 * np.pi - theta_p - theta_s
+    elif (-1. / 2.) * np.pi <= theta_s <= 0 <= theta_p <= 1. / 2. * np.pi:
+        return theta_p - theta_s
+    elif (-1. / 2.) * np.pi <= theta_p <= 0 <= theta_s <= 1. / 2. * np.pi:
+        return theta_p - theta_s
+
+
+def get_unneighbor_nearest_evader(i, point):
+    min_index = 0
+    min_distance = 10000
+    global death, evader_num
+    for j in range(evader_num - len(death)):
+        distance = np.sqrt(np.sum(np.square(point[j] - point[i + evader_num - len(death)])))
+        if distance < min_distance:
+            min_index = j
+            min_distance = distance
+    return min_index
+
+
+def voronoi(points, bound):
+    global agent_num, pursuer_num, evader_num
     circle = []
     tri_lines = []
     tri = Delaunay(points)
@@ -327,6 +418,78 @@ def voronoi(points):
         tup = (tri.simplices[num][1], tri.simplices[num][2])
         tri_lines.append(tup)
 
+    dic = dict()
+    for i in range(len(tri_lines)):
+        if tri_lines[i] in dic.keys():
+            dic[tri_lines[i]].append(int(i) // int(3))
+        else:
+            dic[tri_lines[i]] = [int(i) // int(3)]
+
+    voronoi_graph = dict()
+
+    for key, value in dic.items():
+        if len(value) == 2:
+            x1, y1, x2, y2, flag = intersect(circle[value[0]], circle[value[1]], bound)
+            voronoi_graph[key] = [[x1, y1], [x2, y2], flag]
+        else:
+            for i in range(0, 3):
+                if tri.simplices[value[0]][i] != key[0] and tri.simplices[value[0]][i] != key[1]:
+                    peak = [points[tri.simplices[value[0]][i]][0], points[tri.simplices[value[0]][i]][1]]
+                    break
+            if circle[value[0]][0] < bound[0] or circle[value[0]][0] > bound[1] or circle[value[0]][1] < \
+                    bound[2] or circle[value[0]][1] > bound[3]:
+                x1, y1 = circle[value[0]][0], circle[value[0]][1]
+                x2, y2 = midline(points[key[0]], points[key[1]], peak, bound)
+                flag = 0
+            else:
+                x1, y1, x2, y2, flag = intersect(circle[value[0]],
+                                                 midline(points[key[0]], points[key[1]], peak, bound),
+                                                 bound)
+            voronoi_graph[key] = [[x1, y1], [x2, y2], flag]
+
+    neighbor = []
+    for i in range(agent_num - evader_num):
+        neighbor.append([agent_num])
+    unneighbor = []
+    for tri_line in tri_lines:
+        if is_tri(tri_line):
+            if get_evader(tri_line) not in neighbor[get_pursuer(tri_line)]:
+                if voronoi_graph[tri_line][2] != 0:
+                    if voronoi_graph[tri_line][0][0] != voronoi_graph[tri_line][1][0] or voronoi_graph[tri_line][0][1] != voronoi_graph[tri_line][1][1]:
+                        neighbor[get_pursuer(tri_line)].append(get_evader(tri_line))
+    for i in range(agent_num - evader_num):
+        if len(neighbor[i]) == 1:
+            unneighbor.append(i)
+
+    nearest_evader_index = []
+    for i in range(agent_num - evader_num):
+        nearest_evader_index.append(0)
+
+    theta_v = []
+    for i in range(agent_num - evader_num):
+        if i in unneighbor:
+            nearest_evader_index[i] = get_unneighbor_nearest_evader(i, points)
+            direction = np.array([points[nearest_evader_index[i]][0] - points[i + evader_num - len(death)][0],
+                                  points[nearest_evader_index[i]][1] - points[i + evader_num - len(death)][1]])
+            direction = direction / np.sqrt(np.sum(np.square(direction)))
+            theta = get_theta(direction)
+            theta_v.append(theta)
+
+            # points[i + evader_num - len(death)] = points[i + evader_num - len(death)] + direction
+        else:
+            nearest_evader_index[i] = get_neighbor_nearest_evader(i, neighbor[i][1:], points)
+            mid = [(voronoi_graph[(nearest_evader_index[i], i + evader_num - len(death))][0][0] +
+                    voronoi_graph[(nearest_evader_index[i], i + evader_num - len(death))][1][0]) / 2, (
+                           voronoi_graph[(nearest_evader_index[i], i + evader_num - len(death))][0][1] +
+                           voronoi_graph[(nearest_evader_index[i], i + evader_num - len(death))][1][1]) / 2]
+            direction = np.array([mid[0] - points[i + evader_num - len(death)][0],
+                                  mid[1] - points[i + evader_num - len(death)][1]])
+            direction = direction / np.sqrt(np.sum(np.square(direction)))
+            theta = get_theta(direction)
+            theta_v.append(theta)
+            # points[i + evader_num - len(death)] = points[i + evader_num - len(death)] + direction
+    return theta_v
+
 
 class Controller:
     __robot_name = ''
@@ -343,6 +506,7 @@ class Controller:
         self.__robot_name = robot_name
 
     def callback(self, msg):
+        global pos_x, pos_y, linear_x, angular_z, roll, pitch, yaw, agent_num, Exit_Pos, death_num, death, flag_capture
         model_names = msg.name
         index, count, e_index, p_index = 0, 0, 0, 0
 
@@ -351,23 +515,15 @@ class Controller:
                 index = i
                 break
 
-        roll[self.__index], pitch[self.__index], yaw[self.__index] = tf.transformations.euler_from_quaternion(msg.pose[index].orientation.x, msg.pose[index].orientation.y,
-                                                                                                              msg.pose[index].orientation.z, msg.pose[index].orientation.w)
-
+        roll[self.__index], pitch[self.__index], yaw[self.__index] = tf.transformations.euler_from_quaternion(
+            [msg.pose[index].orientation.x, msg.pose[index].orientation.y,
+             msg.pose[index].orientation.z, msg.pose[index].orientation.w])
         pos_x[self.__index] = msg.pose[index].position.x
         pos_y[self.__index] = msg.pose[index].position.y
         linear_x[self.__index] = msg.twist[index].linear.x
         angular_z[self.__index] = msg.twist[index].angular.z
 
         points = []
-        V_ex = []
-        V_ey = []
-        V_px = []
-        V_py = []
-        theta_er = []
-        theta_pr = []
-        W_e = []
-        W_p = []
 
         for i in range(agent_num):
             if i not in death:
@@ -375,13 +531,31 @@ class Controller:
 
         points = np.array(points)
 
+        theta_v = voronoi(points, Exit_Pos)
+        theta_r = yaw[self.__index]
+        vel_msg = Twist()
+
+        for i in range(agent_num - death_num):
+            if np.sqrt(np.sum(np.square(points[0], points[i + 1]))) < 1:
+                flag_capture = True
+                break
+
+        if flag_capture is not True:
+            vel_msg.linear.x = 1.0
+            vel_msg.linear.y = 0.0
+            vel_msg.linear.z = 0.0
+            vel_msg.angular.z = get_theta_diff(theta_r, theta_v[self.__index]) * 1
+            vel_msg.angular.y = 0.0
+            vel_msg.angular.x = 0.0
+        else:
+            vel_msg.linear.x = 0.0
+            vel_msg.linear.y = 0.0
+            vel_msg.linear.z = 0.0
+            vel_msg.angular.z = 0.0
+            vel_msg.angular.y = 0.0
+            vel_msg.angular.x = 0.0
+        self.__velpub.publish(vel_msg)
 
 
-
-
-
-
-
-
-
+Controller("husky_alpha", 0), Controller("husky_gamma", 1), Controller("husky_delta", 2)
 
