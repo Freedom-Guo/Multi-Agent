@@ -1,4 +1,6 @@
-import csv
+#!/usr/bin/env python
+# -*-coding: UTF-8-*-
+
 import numpy as np
 from geometry_msgs.msg import Twist
 from gazebo_msgs.srv import *
@@ -9,6 +11,7 @@ from gazebo_msgs.msg import ModelStates
 import rospy
 import tf
 import math
+from std_msgs.msg import Float64MultiArray
 
 ##----------------------------------全局参数列表------------------------------------------##
 agent_num = 3
@@ -68,6 +71,7 @@ def get_outer_circle(A, B, C):
         ab = np.pi / 2
 
     if kbc is not None:
+
         bc = np.arctan(kbc)
     else:
         bc = np.pi / 2
@@ -374,17 +378,17 @@ def get_theta(v):
 
 def get_theta_diff(theta_s, theta_p):
     if theta_s >= 0 and theta_p >= 0:
-        return theta_p - theta_s
+        return np.clip(theta_p - theta_s, -1.04, 1.04)
     elif theta_s <= 0 and theta_p <= 0:
-        return theta_p - theta_s
+        return np.clip(theta_p - theta_s, -1.04, 1.04)
     elif (-1) * np.pi <= theta_s <= (-1. / 2.) * np.pi and np.pi >= theta_p >= 1. / 2. * np.pi:
-        return theta_p + theta_s - 2 * np.pi
+        return np.clip(theta_p + theta_s - 2 * np.pi, -1.04, 1.04)
     elif (-1) * np.pi <= theta_p <= (-1. / 2.) * np.pi and np.pi >= theta_s >= 1. / 2. * np.pi:
-        return 2 * np.pi - theta_p - theta_s
+        return np.clip(2 * np.pi - theta_p - theta_s, -1.04, 1.04)
     elif (-1. / 2.) * np.pi <= theta_s <= 0 <= theta_p <= 1. / 2. * np.pi:
-        return theta_p - theta_s
+        return np.clip(theta_p - theta_s, -1.04, 1.04)
     elif (-1. / 2.) * np.pi <= theta_p <= 0 <= theta_s <= 1. / 2. * np.pi:
-        return theta_p - theta_s
+        return np.clip(theta_p - theta_s, -1.04, 1.04)
 
 
 def get_unneighbor_nearest_evader(i, point):
@@ -455,7 +459,8 @@ def voronoi(points, bound):
         if is_tri(tri_line):
             if get_evader(tri_line) not in neighbor[get_pursuer(tri_line)]:
                 if voronoi_graph[tri_line][2] != 0:
-                    if voronoi_graph[tri_line][0][0] != voronoi_graph[tri_line][1][0] or voronoi_graph[tri_line][0][1] != voronoi_graph[tri_line][1][1]:
+                    if voronoi_graph[tri_line][0][0] != voronoi_graph[tri_line][1][0] or voronoi_graph[tri_line][0][
+                        1] != voronoi_graph[tri_line][1][1]:
                         neighbor[get_pursuer(tri_line)].append(get_evader(tri_line))
     for i in range(agent_num - evader_num):
         if len(neighbor[i]) == 1:
@@ -472,8 +477,8 @@ def voronoi(points, bound):
             direction = np.array([points[nearest_evader_index[i]][0] - points[i + evader_num - len(death)][0],
                                   points[nearest_evader_index[i]][1] - points[i + evader_num - len(death)][1]])
             direction = direction / np.sqrt(np.sum(np.square(direction)))
-            theta = get_theta(direction)
-            theta_v.append(theta)
+            # theta = get_theta(direction)
+            theta_v.append(direction)
 
             # points[i + evader_num - len(death)] = points[i + evader_num - len(death)] + direction
         else:
@@ -485,8 +490,8 @@ def voronoi(points, bound):
             direction = np.array([mid[0] - points[i + evader_num - len(death)][0],
                                   mid[1] - points[i + evader_num - len(death)][1]])
             direction = direction / np.sqrt(np.sum(np.square(direction)))
-            theta = get_theta(direction)
-            theta_v.append(theta)
+            # theta = get_theta(direction)
+            theta_v.append(direction)
             # points[i + evader_num - len(death)] = points[i + evader_num - len(death)] + direction
     return theta_v
 
@@ -499,7 +504,8 @@ class Controller:
     def __init__(self, robot_name, index):
         print("class is setting up!")
         rospy.Subscriber('/gazebo/model_states', ModelStates, self.callback, queue_size=10)
-        self.__velpub = rospy.Publisher(robot_name + '/husky_velocity_controller/cmd_vel', queue_size=10)
+        self.__velpub = rospy.Publisher(robot_name + '/husky_velocity_controller/cmd_vel', Twist, queue_size=10)
+        self.__pub = rospy.Publisher(robot_name + '/voronoi_velocity', Float64MultiArray, queue_size=10)
         self.__setstate = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
         self.__stamsg = SetModelStateRequest()
         self.__index = index
@@ -522,6 +528,7 @@ class Controller:
         pos_y[self.__index] = msg.pose[index].position.y
         linear_x[self.__index] = msg.twist[index].linear.x
         angular_z[self.__index] = msg.twist[index].angular.z
+        # rospy.loginfo("%d: %f, %f, %f, %f", self.__index, pos_x[self.__index], pos_y[self.__index],linear_x[self.__index], angular_z[self.__index])
 
         points = []
 
@@ -531,22 +538,41 @@ class Controller:
 
         points = np.array(points)
 
+        # rospy.loginfo("%f %f %f %f %f %f", points[0][0], points[0][1], points[1][0], points[1][1], points[2][0],points[2][1])
+
         theta_v = voronoi(points, Exit_Pos)
+        vor_msg = Float64MultiArray()
+        vor_msg.data = theta_v[self.__index-1]
+        theta_ = []
+        for i in range(pursuer_num):
+            theta_.append(get_theta(theta_v[i]))
+
+        # rospy.loginfo("%f %f", theta_v[0], theta_v[1])
         theta_r = yaw[self.__index]
         vel_msg = Twist()
 
-        for i in range(agent_num - death_num):
-            if np.sqrt(np.sum(np.square(points[0], points[i + 1]))) < 1:
+        for i in range(pursuer_num):
+            if np.sqrt(np.sum(np.square(points[0] - points[i + 1]))) < 1:
+                rospy.loginfo("%d", i)
                 flag_capture = True
                 break
 
-        if flag_capture is not True:
-            vel_msg.linear.x = 1.0
-            vel_msg.linear.y = 0.0
-            vel_msg.linear.z = 0.0
-            vel_msg.angular.z = get_theta_diff(theta_r, theta_v[self.__index]) * 1
-            vel_msg.angular.y = 0.0
-            vel_msg.angular.x = 0.0
+        if self.__index is not 0:
+            if flag_capture is not True:
+                vel_msg.linear.x = 1.0
+                vel_msg.linear.y = 0.0
+                vel_msg.linear.z = 0.0
+                # rospy.loginfo("%f, %f", theta_r, theta_v[self.__index - 1])
+                vel_msg.angular.z = get_theta_diff(theta_r, theta_[self.__index - 1]) * 1.0
+                vel_msg.angular.y = 0.0
+                vel_msg.angular.x = 0.0
+            else:
+                vel_msg.linear.x = 0.0
+                vel_msg.linear.y = 0.0
+                vel_msg.linear.z = 0.0
+                vel_msg.angular.z = 0.0
+                vel_msg.angular.y = 0.0
+                vel_msg.angular.x = 0.0
         else:
             vel_msg.linear.x = 0.0
             vel_msg.linear.y = 0.0
@@ -555,7 +581,10 @@ class Controller:
             vel_msg.angular.y = 0.0
             vel_msg.angular.x = 0.0
         self.__velpub.publish(vel_msg)
+        self.__pub.publish(vor_msg)
 
 
+rospy.init_node('controller')
 Controller("husky_alpha", 0), Controller("husky_gamma", 1), Controller("husky_delta", 2)
+rospy.spin()
 
