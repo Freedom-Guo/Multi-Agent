@@ -1,2 +1,3 @@
 # Multi-Agent
-各种环境下多智能体协同围捕算法的实现
+
+Implementation of multi-agent cooperative hunting algorithm in various environments.
